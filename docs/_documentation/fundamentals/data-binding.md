@@ -2,7 +2,7 @@
 layout: documentation
 title: Data binding
 category: Fundamentals
-order: 2
+order: 1
 ---
 Data binding is the key technology that MVVM relies on, to link Views with their View-Models.
 
@@ -939,16 +939,28 @@ Add something about the Generic implementation of IMvxTargetBinding [#1610](http
 
 ### Dictionary Conversion
 
-Dictionary conversion allows for mapped conversions to be set up within the view's binding code, useful for quickly binding things like icons or color to state properties.
+Dictionary conversion allows for mapped conversions to be set up within the view's binding code, useful for quickly binding things like icons or colors to state properties.
 
 ```c#
-set.Bind(button).To(vm => vm.readonly).WithDictionaryConversion(
-	new Dictionary<bool, Icon>
-	{
-		{true, GreyIcon},
-		{false, BlueIcon}
-	});
+set.Bind(button).To(vm => vm.readonly)
+   .WithDictionaryConversion(new Dictionary<bool, Icon>
+    {
+        {true, GreyIcon},
+        {false, BlueIcon}
+    });
 ```
+
+Additionally, a fallback can be supplied for when a key cannot be found against the supplied Dictionary.
+
+```c#
+set.Bind(button).To(vm => vm.readonly)
+   .WithDictionaryConversion(new Dictionary<bool, Icon>
+    {
+        {true, GreyIcon},
+        {false, BlueIcon}
+    }, RedIcon);
+```
+
 *Note* : This feature is only available in fluent binding.
 
 ### Default view properties

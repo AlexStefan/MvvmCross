@@ -1,17 +1,16 @@
 #tool nuget:?package=GitVersion.CommandLine
-#tool nuget:?package=gitlink&version=2.4.0
 #tool nuget:?package=vswhere
-#tool nuget:?package=NUnit.ConsoleRunner
-#addin nuget:?package=Cake.Incubator&version=1.5.0
-#addin nuget:?package=Cake.Git&version=0.16.0
+#addin nuget:?package=Cake.Incubator&version=1.7.1
+#addin nuget:?package=Cake.Git&version=0.16.1
 #addin nuget:?package=Polly
 
 using Polly;
 
-var sln = new FilePath("MvvmCross_All.sln");
-var outputDir = new DirectoryPath("artifacts");
-var nuspecDir = new DirectoryPath("nuspec");
+var sln = new FilePath("./MvvmCross.sln");
+var outputDir = new DirectoryPath("./artifacts");
+var nuspecDir = new DirectoryPath("./nuspec");
 var target = Argument("target", "Default");
+var configuration = Argument("configuration", "Release");
 
 var isRunningOnAppVeyor = AppVeyor.IsRunningOnAppVeyor;
 
@@ -39,11 +38,14 @@ Task("UpdateAppVeyorBuildNumber")
     .WithCriteria(() => isRunningOnAppVeyor)
     .Does(() =>
 {
-    AppVeyor.UpdateBuildVersion(versionInfo.FullBuildMetaData);
+    var buildNumber = AppVeyor.Environment.Build.Number;
+    AppVeyor.UpdateBuildVersion(versionInfo.InformationalVersion
+        + "-" + buildNumber);
 });
 
 FilePath msBuildPath;
 Task("ResolveBuildTools")
+    .WithCriteria(() => IsRunningOnWindows())
     .Does(() => 
 {
     var vsLatest = VSWhereLatest();
@@ -55,29 +57,41 @@ Task("ResolveBuildTools")
 Task("Restore")
     .IsDependentOn("ResolveBuildTools")
     .Does(() => {
-    NuGetRestore(sln, new NuGetRestoreSettings {
-        Verbosity = NuGetVerbosity.Quiet
-    });
-    // MSBuild(sln, settings => settings.WithTarget("Restore"));
+    MSBuild(sln, settings => settings.WithTarget("Restore"));
+});
+
+Task("PatchBuildProps")
+    .IsDependentOn("Version")
+    .Does(() => 
+{
+    var buildProp = new FilePath("./Directory.build.props");
+    XmlPoke(buildProp, "//Project/PropertyGroup/Version", versionInfo.SemVer);
 });
 
 Task("Build")
     .IsDependentOn("ResolveBuildTools")
     .IsDependentOn("Clean")
+    .IsDependentOn("Version")
     .IsDependentOn("UpdateAppVeyorBuildNumber")
+    .IsDependentOn("PatchBuildProps")
     .IsDependentOn("Restore")
     .Does(() =>  {
 
     var settings = new MSBuildSettings 
     {
-        Configuration = "Release",
+        Configuration = configuration,
         ToolPath = msBuildPath,
         Verbosity = Verbosity.Minimal,
         ArgumentCustomization = args => args.Append("/m")
     };
 
-    settings.Properties.Add("DebugSymbols", new List<string> { "True" });
-    settings.Properties.Add("DebugType", new List<string> { "Full" });
+    settings = settings
+        .WithProperty("DebugSymbols", "True")
+        .WithProperty("DebugType", "Embedded")
+        .WithProperty("Version", versionInfo.SemVer)
+        .WithProperty("PackageVersion", versionInfo.SemVer)
+        .WithProperty("InformationalVersion", versionInfo.InformationalVersion)
+        .WithProperty("NoPackageAnalysis", "True");
 
     MSBuild(sln, settings);
 });
@@ -86,162 +100,37 @@ Task("UnitTest")
     .IsDependentOn("Build")
     .Does(() =>
 {
-    var testPaths = new List<string> {
-        new FilePath("./MvvmCross/Test/Test/bin/Release/MvvmCross.Test.dll").FullPath,
-        new FilePath("./MvvmCross/Binding/Test/bin/Release/MvvmCross.Binding.Test.dll").FullPath,
-        new FilePath("./MvvmCross/Platform/Test/bin/Release/MvvmCross.Platform.Test.dll").FullPath,
-        new FilePath("./MvvmCross-Plugins/Color/MvvmCross.Plugins.Color.Test/bin/Release/MvvmCross.Plugins.Color.Test.dll").FullPath,
-        new FilePath("./MvvmCross-Plugins/Messenger/MvvmCross.Plugins.Messenger.Test/bin/Release/MvvmCross.Plugins.Messenger.Test.dll").FullPath,
-        new FilePath("./MvvmCross-Plugins/Network/MvvmCross.Plugins.Network.Test/bin/Release/MvvmCross.Plugins.Network.Test.dll").FullPath,
-        new FilePath("./MvvmCross-Plugins/JsonLocalization/MvvmCross.Plugins.JsonLocalization.Tests/bin/Release/MvvmCross.Plugins.JsonLocalization.Tests.dll").FullPath,
-        new FilePath("./MvvmCross-Plugins/ResxLocalization/MvvmCross.Plugins.ResxLocalization.Tests/bin/Release/MvvmCross.Plugins.ResxLocalization.Tests.dll").FullPath
-    };
+    EnsureDirectoryExists(outputDir + "/Tests/");
 
-    var testResultsPath = new FilePath(outputDir + "/NUnitTestResult.xml");
-
-    NUnit3(testPaths, new NUnit3Settings {
-        Timeout = 30000,
-        OutputFile = new FilePath(outputDir + "/NUnitOutput.txt"),
-        Results = testResultsPath
-    });
+    var testPaths = GetFiles("./UnitTests/*.UnitTest/*.UnitTest.csproj");
+    var testsFailed = false;
+    foreach(var project in testPaths)
+    {
+        var projectName = project.GetFilenameWithoutExtension();
+        var testXml = new FilePath(outputDir + "/Tests/" + projectName + ".xml").MakeAbsolute(Context.Environment);
+        try 
+        {
+            DotNetCoreTool(project,
+                "xunit",  "-fxversion 2.0.0 --no-build -parallel none -configuration " + 
+                configuration + " -xml \"" + testXml.FullPath + "\"");
+        }
+        catch
+        {
+            testsFailed = true;
+        }
+    }
 
     if (isRunningOnAppVeyor)
     {
-        AppVeyor.UploadTestResults(testResultsPath, AppVeyorTestResultsType.NUnit3);
+        foreach(var testResult in GetFiles(outputDir + "/Tests/*.xml"))
+            AppVeyor.UploadTestResults(testResult, AppVeyorTestResultsType.XUnit);
     }
-});
 
-Task("GitLink")
-    .IsDependentOn("UnitTest")
-    //pdbstr.exe and costura are not xplat currently
-    .WithCriteria(() => IsRunningOnWindows())
-    .WithCriteria(() => 
-        StringComparer.OrdinalIgnoreCase.Equals(versionInfo.BranchName, "develop") || 
-        IsMasterOrReleases())
-    .Does(() => 
-{
-    var projectsToIgnore = new string[] {
-        "PageRendererExample.Core",
-        "PageRendererExample.Droid",
-        "PageRendererExample.iOS",
-        "PageRendererExample.WindowsUWP",
-        "MvvmCross.iOS.Support.ExpandableTableView.Core",
-        "MvvmCross.iOS.Support.ExpandableTableView.iOS",
-        "MvvmCross.iOS.Support.XamarinSidebarSample.Core",
-        "MvvmCross.iOS.Support.XamarinSidebarSample.iOS",
-        "mvvmcross.codeanalysis.vsix",
-        "Example.Core",
-        "Example.Droid",
-        "Eventhooks.Core",
-        "Eventhooks.Droid",
-        "Eventhooks.iOS",
-        "Eventhooks.Uwp",
-        "Eventhooks.Wpf",
-        "RoutingExample.Core",
-        "RoutingExample.iOS",
-        "RoutingExample.Droid",
-        "MvvmCross.TestProjects.CustomBinding.Core",
-        "MvvmCross.TestProjects.CustomBinding.iOS",
-        "MvvmCross.TestProjects.CustomBinding.Droid",
-        "playground",
-        "playground.core",
-        "playground.ios",
-        "playground.mac",
-        "playground.wpf",
-        "Playground.Droid",
-        "Playground.Uwp",
-        "Playground.Forms.Droid",
-        "Playground.Forms.iOS",
-        "Playground.Forms.Mac",
-        "Playground.Forms.Uwp",
-        "Playground.Forms.Wpf"
-    };
-
-    GitLink("./", 
-        new GitLinkSettings {
-            RepositoryUrl = "https://github.com/mvvmcross/mvvmcross",
-            Configuration = "Release",
-            SolutionFileName = "MvvmCross_All.sln",
-            ArgumentCustomization = args => args.Append("-ignore " + string.Join(",", projectsToIgnore))
-        });
-});
-
-Task("Package")
-    .IsDependentOn("GitLink")
-    .WithCriteria(() => 
-        StringComparer.OrdinalIgnoreCase.Equals(versionInfo.BranchName, "develop") || 
-        IsMasterOrReleases())
-    .Does(() => 
-{
-    var nugetSettings = new NuGetPackSettings {
-        Authors = new [] { "MvvmCross contributors" },
-        Owners = new [] { "MvvmCross" },
-        IconUrl = new Uri("http://i.imgur.com/Baucn8c.png"),
-        ProjectUrl = new Uri("https://github.com/MvvmCross/MvvmCross"),
-        LicenseUrl = new Uri("https://raw.githubusercontent.com/MvvmCross/MvvmCross/develop/LICENSE"),
-        Copyright = "Copyright (c) MvvmCross",
-        RequireLicenseAcceptance = false,
-        Version = versionInfo.NuGetVersion,
-        Symbols = false,
-        NoPackageAnalysis = true,
-        OutputDirectory = outputDir,
-        Verbosity = NuGetVerbosity.Detailed,
-        BasePath = "./nuspec"
-    };
-
-    var nuspecs = new List<string> {
-        "MvvmCross.nuspec",
-        "MvvmCross.Binding.nuspec",
-        "MvvmCross.CodeAnalysis.nuspec",
-        "MvvmCross.Console.Platform.nuspec",
-        "MvvmCross.Core.nuspec",
-        "MvvmCross.Droid.Support.Core.UI.nuspec",
-        "MvvmCross.Droid.Support.Core.Utils.nuspec",
-        "MvvmCross.Droid.Support.Design.nuspec",
-        "MvvmCross.Droid.Support.Fragment.nuspec",
-        "MvvmCross.Droid.Support.V7.AppCompat.nuspec",
-        "MvvmCross.Droid.Support.V7.Preference.nuspec",
-        "MvvmCross.Droid.Support.V7.RecyclerView.nuspec",
-        "MvvmCross.Droid.Support.V14.Preference.nuspec",
-        "MvvmCross.Droid.Support.V17.Leanback.nuspec",
-        "MvvmCross.Forms.nuspec",
-        "MvvmCross.iOS.Support.nuspec",
-        "MvvmCross.iOS.Support.XamarinSidebar.nuspec",
-        "MvvmCross.Platform.nuspec",
-        "MvvmCross.Plugin.Accelerometer.nuspec",
-        "MvvmCross.Plugin.All.nuspec",
-        "MvvmCross.Plugin.Color.nuspec",
-        "MvvmCross.Plugin.DownloadCache.nuspec",
-        "MvvmCross.Plugin.Email.nuspec",
-        "MvvmCross.Plugin.FieldBinding.nuspec",
-        "MvvmCross.Plugin.File.nuspec",
-        "MvvmCross.Plugin.Json.nuspec",
-        "MvvmCross.Plugin.JsonLocalization.nuspec",
-        "MvvmCross.Plugin.Location.nuspec",
-        "MvvmCross.Plugin.Location.Fused.nuspec",
-        "MvvmCross.Plugin.Messenger.nuspec",
-        "MvvmCross.Plugin.MethodBinding.nuspec",
-        "MvvmCross.Plugin.Network.nuspec",
-        "MvvmCross.Plugin.PhoneCall.nuspec",
-        "MvvmCross.Plugin.PictureChooser.nuspec",
-        "MvvmCross.Plugin.ResourceLoader.nuspec",
-        "MvvmCross.Plugin.ResxLocalization.nuspec",
-        "MvvmCross.Plugin.Share.nuspec",
-        "MvvmCross.Plugin.Visibility.nuspec",
-        "MvvmCross.Plugin.WebBrowser.nuspec",
-        "MvvmCross.StarterPack.nuspec",
-        "MvvmCross.Forms.StarterPack.nuspec",
-        "MvvmCross.Tests.nuspec"
-    };
-
-    foreach(var nuspec in nuspecs)
-    {
-        NuGetPack(nuspecDir + "/" + nuspec, nugetSettings);
-    }
+    if (testsFailed)
+        throw new Exception("Tests failed :(");
 });
 
 Task("PublishPackages")
-    .IsDependentOn("Package")
     .WithCriteria(() => !BuildSystem.IsLocalBuild)
     .WithCriteria(() => IsRepository("mvvmcross/mvvmcross"))
     .WithCriteria(() => 
@@ -260,11 +149,12 @@ Task("PublishPackages")
     var apiKey = nugetKeySource.Item1;
     var source = nugetKeySource.Item2;
 
-    var nugetFiles = GetFiles(outputDir + "/*.nupkg");
+    var nugetFiles = GetFiles("MvvmCross*/**/bin/" + configuration + "/**/*.nupkg");
 
     var policy = Policy
   		.Handle<Exception>()
-  		.WaitAndRetry(5, retryAttempt => TimeSpan.FromSeconds(Math.Pow(1.5, retryAttempt)));
+        .WaitAndRetry(5, retryAttempt => 
+            TimeSpan.FromSeconds(Math.Pow(1.5, retryAttempt)));
 
     foreach(var nugetFile in nugetFiles)
     {
@@ -278,8 +168,6 @@ Task("PublishPackages")
 });
 
 Task("UploadAppVeyorArtifact")
-    .IsDependentOn("Package")
-    .WithCriteria(() => !AppVeyor.Environment.PullRequest.IsPullRequest)
     .WithCriteria(() => isRunningOnAppVeyor)
     .Does(() => {
 
@@ -287,7 +175,10 @@ Task("UploadAppVeyorArtifact")
 
     var uploadSettings = new AppVeyorUploadArtifactsSettings();
 
-    foreach(var file in GetFiles(outputDir.FullPath + "/*")) {
+    var artifacts = GetFiles("MvvmCross*/**/bin/" + configuration + "/**/*.nupkg")
+        + GetFiles(outputDir.FullPath + "/**/*");
+
+    foreach(var file in artifacts) {
         Information("Uploading {0}", file.FullPath);
 
         if (file.GetExtension() == "nupkg")
@@ -300,6 +191,8 @@ Task("UploadAppVeyorArtifact")
 });
 
 Task("Default")
+    .IsDependentOn("Build")
+    .IsDependentOn("UnitTest")
     .IsDependentOn("PublishPackages")
     .IsDependentOn("UploadAppVeyorArtifact")
     .Does(() => 

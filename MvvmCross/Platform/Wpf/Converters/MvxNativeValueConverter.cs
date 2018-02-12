@@ -1,16 +1,13 @@
-// MvxNativeValueConverter.cs
-
-// MvvmCross is licensed using Microsoft Public License (Ms-PL)
-// Contributions and inspirations noted in readme.md and license.txt
-//
-// Project Lead - Stuart Lodge, @slodge, me@slodge.com
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MS-PL license.
+// See the LICENSE file in the project root for more information.
 
 using System;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Data;
 using System.Windows.Markup;
-using MvvmCross.Platform.Converters;
+using MvvmCross.Converters;
 
 namespace MvvmCross.Platform.Wpf.Converters
 {
@@ -42,7 +39,7 @@ namespace MvvmCross.Platform.Wpf.Converters
         {
             if (toReturn == MvxBindingConstant.DoNothing)
             {
-                return Binding.DoNothing;
+                return System.Windows.Data.Binding.DoNothing;
             }
 
             if (toReturn == MvxBindingConstant.UnsetValue)
